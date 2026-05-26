@@ -7,32 +7,47 @@
 
   outputs = { self, nixpkgs }:
     let
-      system = "x86_64-linux"; # Измените на aarch64-linux / x86_64-darwin, если у вас другая платформа
+      system = "x86_64-linux"; 
       pkgs = import nixpkgs { inherit system; };
       
       pythonEnv = pkgs.python3.withPackages (ps: [
-        ps.opensearch-py # Официальный питоновский клиент, совместимый с ES API
+        ps.opensearch-py
       ]);
     in
     {
       devShells.${system}.default = pkgs.mkShell {
         buildInputs = [
-          pkgs.opensearch
+          pkgs.cargo
+          pkgs.rustc
           pkgs.jre
           pythonEnv
+          pkgs.gnutar
+          pkgs.gzip
+          pkgs.curl
         ];
 
         shellHook = ''
-          export ES_DIR="$PWD/opensearch_data"
-          export ES_CONF="$ES_DIR/config"
+          export ES_DIR="$PWD/opensearch_runtime"
           export PORT=9200
           
-          mkdir -p "$ES_CONF" "$ES_DIR/data" "$ES_DIR/logs"
+          # Если папка не создана или пуста — качаем и настраиваем
+          if [ ! -f "$ES_DIR/bin/opensearch" ]; then
+            echo "[Nix] Очистка старых битых файлов..."
+            rm -rf "$ES_DIR" opensearch_download.tar.gz
+            mkdir -p "$ES_DIR"
 
-          # Генерируем минимальный opensearch.yml
-          if [ ! -f "$ES_CONF/opensearch.yml" ]; then
-            echo "[Nix] Создание локальной конфигурации OpenSearch..."
-            cat <<EOF > "$ES_CONF/opensearch.yml"
+            echo "[Nix] Скачивание официального релиза OpenSearch 2.11.0 (с защитой от сбоев)..."
+            # curl с флагами -L (follow redirect), -C - (resume), --retry (повторы при сбоях)
+            curl -L --retry 5 --retry-delay 3 -C - \
+              "https://artifacts.opensearch.org/releases/bundle/opensearch/2.11.0/opensearch-2.11.0-linux-x64.tar.gz" \
+              -o opensearch_download.tar.gz
+
+            echo "[Nix] Распаковка архива..."
+            tar -xzf opensearch_download.tar.gz -C "$ES_DIR" --strip-components=1
+            rm opensearch_download.tar.gz
+            
+            echo "[Nix] Конфигурация локального инстанса..."
+            cat <<EOF > "$ES_DIR/config/opensearch.yml"
 cluster.name: test-cluster
 node.name: test-node-1
 path.data: $ES_DIR/data
@@ -40,24 +55,27 @@ path.logs: $ES_DIR/logs
 network.host: 127.0.0.1
 http.port: $PORT
 discovery.type: single-node
-
-# Отключаем плагин безопасности для простоты локального тестирования без SSL/паролей
 plugins.security.disabled: true
 EOF
-          fi
 
-          export OPENSEARCH_PATH_CONF="$ES_CONF"
+            cat <<EOF > "$ES_DIR/config/jvm.options.d/memory.options"
+-Xms512m
+-Xmx512m
+EOF
+          fi
 
           echo "--------------------------------------------------------"
           echo " Доступные команды Elasticsearch-стенда:"
           echo "   start-es   - Запустить локальный инстанс"
           echo "   stop-es    - Остановить инстанс"
           echo "   run-bench  - Сгенерировать поисковый индекс и собрать сегменты"
+          echo "   run-entropy - Вычислить энтропию"
           echo "--------------------------------------------------------"
 
-          alias start-es="opensearch -d -p \$ES_DIR/opensearch.pid"
-          alias stop-es="kill \$(cat \$ES_DIR/opensearch.pid) && rm \$ES_DIR/opensearch.pid"
+          alias start-es="$ES_DIR/bin/opensearch -d -p \$ES_DIR/opensearch.pid"
+          alias stop-es="[ -f \$ES_DIR/opensearch.pid ] && kill \$(cat \$ES_DIR/opensearch.pid) && rm \$ES_DIR/opensearch.pid"
           alias run-bench="python collect_es_blocks.py"
+          alias run-entropy="cargo run --release --manifest-path=$PWD/entropy_analyzer/Cargo.toml --"
         '';
       };
     };

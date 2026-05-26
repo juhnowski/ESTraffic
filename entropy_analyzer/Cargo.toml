@@ -1,0 +1,9 @@
+[package]
+name = "entropy_analyzer"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+clap = { version = "4.4", features = ["derive"] } # Парсинг аргументов CLI
+indicatif = "0.17"                               # Красивый прогресс-бар
+comfy-table = "7.1"                             # Таблицы в терминале

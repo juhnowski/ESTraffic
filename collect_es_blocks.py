@@ -3,6 +3,7 @@ import shutil
 import time
 import subprocess
 from opensearchpy import OpenSearch
+import glob
 
 OUTPUT_DIR = "./es_bench_blocks"
 ES_DATA_DIR = "./opensearch_data/data/nodes/0/indices"
@@ -114,41 +115,51 @@ def main():
 
     client.close()
     
-    # Останавливаем сервис для безопасного копирования файлов
-    print("\n[+] Останавливаем OpenSearch для фиксации файлов сегментов...")
-    subprocess.run("kill $(cat ./opensearch_data/opensearch.pid) && rm ./opensearch_data/opensearch.pid", shell=True)
-    time.sleep(3)
-    
+    # 1. Исправляем остановку процесса OpenSearch
+    PID_PATH = "./opensearch_runtime/opensearch.pid"
+    if os.path.exists(PID_PATH):
+        print("[+] Останавливаем OpenSearch для фиксации файлов сегментов...")
+        with open(PID_PATH, "r") as f:
+            pid = f.read().strip()
+        try:
+            os.kill(int(pid), 15)  # SIGTERM
+            print(f"    Процесс {pid} остановлен.")
+        except ProcessLookupError:
+            pass
+        if os.path.exists(PID_PATH):
+            os.remove(PID_PATH)
+
+    # 2. Исправляем сбор бинарных файлов Lucene (используем glob для обхода UUID)
+    DATA_BASE_DIR = "./opensearch_runtime/data/nodes/0/indices"
+    TARGET_DIR = "./collected_lucene_segments"
+    os.makedirs(TARGET_DIR, exist_ok=True)
+
     print("\n[+] Сбор бинарных файлов данных Apache Lucene (.fdt / .cfs)...")
-    for name, uuid in index_mapping_paths.items():
-        # Путь к сегментам первого шарда: index_uuid/0/index/
-        shard_dir = os.path.join(ES_DATA_DIR, uuid, "0", "index")
-        
-        if not os.path.exists(shard_dir):
-            print(f"    Ошибка: Директория {shard_dir} не найдена!")
-            continue
-            
-        # Современный Lucene может упаковывать сегменты в составной файл .cfs (Compound File)
-        # или хранить раздельно в .fdt. Ищем файлы крупнее пары килобайт.
-        target_files = [f for f in os.listdir(shard_dir) if f.endswith(".cfs") or f.endswith(".fdt")]
-        
-        if not target_files:
-            print(f"    Ошибка: Файлы данных сегментов в {name} не найдены!")
-            continue
-            
-        # Берем самый большой файл (это и есть наш объединенный сегмент с документами)
-        target_files.sort(key=lambda x: os.path.getsize(os.path.join(shard_dir, x)), reverse=True)
-        largest_file = target_files[0]
-        
-        src_file = os.path.join(shard_dir, largest_file)
-        ext = largest_file.split(".")[-1]
-        dest_file = os.path.join(OUTPUT_DIR, f"elasticsearch_{name}_segment.{ext}.raw")
-        
-        shutil.copy(src_file, dest_file)
-        size_kb = os.path.getsize(dest_file) // 1024
-        print(f"    Сохранено: {dest_file} ({size_kb} KB)")
-        
-    print("\n[+] Сбор блоков для Elasticsearch/OpenSearch завершен!")
+
+    if not os.path.exists(DATA_BASE_DIR):
+        print(f"    Ошибка: Базовая директория данных {DATA_BASE_DIR} не найдена!")
+    else:
+        # Ищем файлы сегментов во всех подпапках индексов OpenSearch
+        # Поиск файлов *.fdt (данные полей) и *.cfs (составные сегменты)
+        lucene_files = glob.glob(f"{DATA_BASE_DIR}/**/0/index/*.fdt", recursive=True) + \
+                    glob.glob(f"{DATA_BASE_DIR}/**/0/index/*.cfs", recursive=True) + \
+                    glob.glob(f"{DATA_BASE_DIR}/**/0/index/*.si", recursive=True)
+
+        if not lucene_files:
+            print("    Предупреждение: Файлы Lucene не найдены. Проверьте, завершилась ли запись на диск.")
+        else:
+            for file_path in lucene_files:
+                file_name = os.path.basename(file_path)
+                # Чтобы понять, к какому индексу принадлежит файл, можно вытащить UUID из пути
+                # Путь обычно: .../indices/[UUID]/0/index/[FILE]
+                parts = file_path.split(os.sep)
+                uuid_folder = parts[-4] if len(parts) >= 4 else "unknown"
+                
+                new_name = f"{uuid_folder}_{file_name}"
+                shutil.copy2(file_path, os.path.join(TARGET_DIR, new_name))
+                print(f"    Скопирован сегмент: {new_name}")
+
+    print("\n[+] Сбор блоков завершен!")
 
 if __name__ == "__main__":
     main()

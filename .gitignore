@@ -1,0 +1,4 @@
+collected_lucene_segments/
+opensearch_data/
+opensearch_runtime/
+entropy_analyzer/target/
